@@ -1,19 +1,22 @@
 use abi_stable::std_types::{ROption, RString, RVec};
 use anyrun_plugin::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
+use std::fs::File;
+use std::io::prelude::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Coin {
     symbol: String,
     price: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct Config {
     prefix: String,
     coins: Vec<String>,
-    max_entries: usize,
+    max_cache_age: u64,
 }
 
 impl Default for Config {
@@ -24,7 +27,7 @@ impl Default for Config {
         Self {
             prefix: "$".to_string(),
             coins: list.iter().map(|c| c.to_string()).collect(),
-            max_entries: 10,
+            max_cache_age: 900,
         }
     }
 }
@@ -34,8 +37,35 @@ struct State {
     coins: Vec<Coin>,
 }
 
-fn fetch_coins(coins: Vec<String>) -> Vec<Coin> {
+#[derive(Serialize, Deserialize)]
+struct Cache {
+    age: u64,
+    coins: Vec<Coin>,
+}
+
+/// Fetches coins and handles cache
+fn fetch_coins(coins: Vec<String>, max_age: u64) -> Vec<Coin> {
     let mut vec = Vec::new();
+
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let cache_path = format!("{}/cryptorun.json", env!("XDG_CACHE_HOME"));
+    let cache = match fs::read_to_string(&cache_path) {
+        Ok(content) => {
+            Some(serde_json::from_str::<Cache>(&content).expect("Failed to parse cache file"))
+        }
+        Err(_) => None,
+    };
+
+    if let Some(cache) = cache {
+        if time - cache.age < max_age {
+            return cache.coins;
+        }
+    }
+
     for coin in coins {
         match reqwest::blocking::get(format!(
             "https://api.binance.com/api/v3/ticker/price?symbol={}",
@@ -48,6 +78,16 @@ fn fetch_coins(coins: Vec<String>) -> Vec<Coin> {
             Err(why) => println!("Error fetching up-to-date currency conversions: {}", why),
         }
     }
+
+    let new_cache = Cache {
+        coins: vec.clone(),
+        age: time,
+    };
+    let mut cache_file = File::create(&cache_path).expect("Error while writing cache file");
+    cache_file
+        .write_all(serde_json::to_string(&new_cache).unwrap().as_bytes())
+        .unwrap();
+
     vec
 }
 #[init]
@@ -59,8 +99,8 @@ fn init(config_dir: RString) -> State {
     let coins = config.coins.clone();
 
     State {
-        config,
-        coins: fetch_coins(coins),
+        config: config.clone(),
+        coins: fetch_coins(coins, config.max_cache_age),
     }
 }
 
@@ -78,9 +118,7 @@ fn get_matches(input: RString, state: &mut State) -> RVec<Match> {
         return RVec::new();
     }
     let mut vec = RVec::new();
-    let mut i: usize = 0;
     for coin in &state.coins {
-        i += 1;
         let price = (coin.price.clone().parse::<f64>().unwrap() * 100.).round() / 100.;
         vec.push(Match {
             title: coin.symbol.clone().into(),
@@ -89,9 +127,6 @@ fn get_matches(input: RString, state: &mut State) -> RVec<Match> {
             description: ROption::RSome(format!("{:.2}$", price).into()),
             id: ROption::RNone,
         });
-        if i >= state.config.max_entries {
-            break;
-        }
     }
 
     vec
