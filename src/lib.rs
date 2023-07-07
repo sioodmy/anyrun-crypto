@@ -52,7 +52,10 @@ fn fetch_coins(coins: Vec<String>, max_age: u64) -> Vec<Coin> {
         .unwrap()
         .as_secs();
 
-    let cache_path = format!("{}/cryptorun.json", env!("XDG_CACHE_HOME"));
+    let cache_path = format!(
+        "{}/cryptorun.json",
+        std::env::var("XDG_CACHE_HOME").unwrap()
+    );
     let cache = match fs::read_to_string(&cache_path) {
         Ok(content) => {
             Some(serde_json::from_str::<Cache>(&content).expect("Failed to parse cache file"))
